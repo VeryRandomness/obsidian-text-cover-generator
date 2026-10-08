@@ -4,6 +4,6 @@
   "version": "1.0.2",
   "minAppVersion": "1.8.0",
   "description": "Displays auto-generated text as the cover in Obsidian Bases card views. Falls back to note body when no explicit cover text is set.",
-  "author": "Christopher Butters",
+  "author": "VeryRandomness",
   "isDesktopOnly": false
 }
