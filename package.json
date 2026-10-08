@@ -1,0 +1,17 @@
+{
+  "name": "text-cover-generator",
+  "version": "1.0.0",
+  "description": "Obsidian plugin: text covers for Bases card views",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": ["obsidian", "plugin"],
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.21.0",
+    "obsidian": "^1.8.0",
+    "typescript": "^5.4.0"
+  }
+}

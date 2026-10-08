@@ -1,0 +1,47 @@
+/* Text Cover Generator — covers for Obsidian Bases card views */
+
+.tcg-cover {
+  /* Fill the cover slot absolutely so height:100% ambiguity never bites us */
+  position: absolute;
+  inset: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  text-align: center;
+  font-style: italic;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  word-break: break-word;
+  hyphens: auto;
+  overflow: hidden;
+
+  box-sizing: border-box;
+  border-radius: inherit;
+  user-select: none;
+}
+
+/* Decorative opening-quote mark */
+.tcg-cover[data-quotemark]::before {
+  content: '\201C';
+  position: absolute;
+  top: 0.15em;
+  left: 0.15em;
+  font-size: 5em;
+  font-style: normal;
+  opacity: 0.12;
+  line-height: 1;
+  pointer-events: none;
+  font-family: Georgia, serif;
+}
+
+/* Subtle vignette overlay */
+.tcg-cover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 60%, rgba(0, 0, 0, 0.25) 100%);
+  pointer-events: none;
+  border-radius: inherit;
+}
