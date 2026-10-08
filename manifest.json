@@ -1,7 +1,7 @@
 {
   "id": "text-cover-generator",
   "name": "Text Cover Generator",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.8.0",
   "description": "Displays auto-generated text as the cover in Obsidian Bases card views. Falls back to note body when no explicit cover text is set.",
   "author": "Christopher Butters",
