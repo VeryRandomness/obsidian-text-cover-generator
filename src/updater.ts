@@ -36,8 +36,11 @@ async function check(plugin: Plugin, repo: string, manual: boolean) {
 		const ref = await latestRef(repo);
 		const remoteManifest = await fetchText(repo, ref, "manifest.json");
 		const version: string = JSON.parse(remoteManifest).version;
-		if (!newer(version, manifest.version)) {
-			if (manual) new Notice(`${manifest.name} is up to date (version ${manifest.version}).`);
+		// Read the installed version from disk: after a reload Obsidian keeps serving the stale in-memory manifest.
+		let installed = manifest.version;
+		try { installed = JSON.parse(await app.vault.adapter.read(`${manifest.dir}/manifest.json`)).version; } catch { /* use in-memory */ }
+		if (!newer(version, installed)) {
+			if (manual) new Notice(`${manifest.name} is up to date (version ${installed}).`);
 			return;
 		}
 
