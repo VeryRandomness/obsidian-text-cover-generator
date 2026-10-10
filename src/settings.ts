@@ -58,13 +58,20 @@ export class TextCoverSettingTab extends PluginSettingTab {
     // ── How to see text covers ────────────────────────────────────────────────
     containerEl.createEl('h3', { text: 'How to see text covers' });
     const steps = containerEl.createEl('ol', { cls: 'setting-item-description' });
-    [
-      'Open a Base and switch to (or add) a Cards view.',
-      'In the view options, set "Image property" to textCover.',
-      'Each card without a real image now shows its text cover. The text comes from the note’s ' +
-        'textCover property if set, otherwise from the note body (see Content below).',
-      'Optional: set textCoverBg / textCoverColor in a note’s properties to style its cover.',
-    ].forEach((t) => steps.createEl('li', { text: t }));
+    // The steps name the configured property, so redraw them when it changes.
+    const renderSteps = () => {
+      const prop = this.plugin.settings.contentProperty;
+      steps.empty();
+      [
+        'Open a Base and switch to (or add) a Cards view.',
+        `In the view options, set "Image property" to ${prop}.`,
+        `Each card without a real image now shows its text cover. The text comes from the note’s ${prop} ` +
+          'property if set, otherwise from the note body (see Content below).',
+        'Optional: set textCoverBg / textCoverColor in a note’s properties to style its cover.',
+      ].forEach((t) => steps.createEl('li', { text: t }));
+    };
+    renderSteps();
+    let registerTimer: ReturnType<typeof setTimeout> | undefined;
 
     // ── Content ──────────────────────────────────────────────────────────────
     containerEl.createEl('h3', { text: 'Content' });

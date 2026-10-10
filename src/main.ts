@@ -59,7 +59,7 @@ export default class TextCoverPlugin extends Plugin {
   async onload() {
     setupAutoUpdate(this, 'VeryRandomness/obsidian-text-cover-generator');
     await this.loadSettings();
-    this.app.workspace.onLayoutReady(() => this._registerContentProperty());
+    this.app.workspace.onLayoutReady(() => this.registerContentProperty());
 
     this.addSettingTab(new TextCoverSettingTab(this.app, this));
 
@@ -329,7 +329,7 @@ export default class TextCoverPlugin extends Plugin {
   // Registers the content property in Obsidian's vault-wide property list
   // (Settings → Properties) so Bases offers it as a card image even when no
   // note has it. Relies on an undocumented internal, so every step is guarded.
-  private async _registerContentProperty() {
+  async registerContentProperty() {
     try {
       const mtm = (this.app as any).metadataTypeManager;
       const name = this.settings.contentProperty;
