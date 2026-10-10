@@ -61,9 +61,9 @@ export class TextCoverSettingTab extends PluginSettingTab {
     [
       'Open a Base and switch to (or add) a Cards view.',
       'In the view options, set "Image property" to textCover.',
-      'Each card without a real image now shows its text cover. The text comes from the note's ' +
+      'Each card without a real image now shows its text cover. The text comes from the note’s ' +
         'textCover property if set, otherwise from the note body (see Content below).',
-      'Optional: set textCoverBg / textCoverColor in a note's properties to style its cover.',
+      'Optional: set textCoverBg / textCoverColor in a note’s properties to style its cover.',
     ].forEach((t) => steps.createEl('li', { text: t }));
 
     // ── Content ──────────────────────────────────────────────────────────────
