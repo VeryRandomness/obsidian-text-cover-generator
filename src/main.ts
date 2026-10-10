@@ -21,6 +21,10 @@ const ALT_SOURCE_KEYS = ['coverSmallUrl', 'coverMediumUrl', 'coverLargeUrl'];
 // cached text wrong even though the settings fingerprint didn't change.
 const CACHE_SCHEMA_VERSION = 1;
 
+// ~128px thumbnails and "image not available" placeholders are a few KB;
+// real covers are much bigger.
+const MIN_GOOD_BYTES = 15000;
+
 interface CacheEntry {
   text: string | null; // null = definitively no text (was in _noText)
   mtime: number;
@@ -328,7 +332,7 @@ export default class TextCoverPlugin extends Plugin {
   // local file fixes both: it's now a same-origin resource with no CORS involved.
   async downloadRemoteCovers(onProgress?: (done: number, total: number) => void): Promise<number> {
     const files = this.app.vault.getMarkdownFiles();
-    const targets: { file: TFile; key: string; url: string }[] = [];
+    const targets: { file: TFile; key: string; url: string; fm: Record<string, unknown>; upgrade?: TFile }[] = [];
 
     for (const file of files) {
       const meta = this.app.metadataCache.getFileCache(file);
@@ -340,7 +344,7 @@ export default class TextCoverPlugin extends Plugin {
       for (const key of IMAGE_PROPERTY_KEYS) {
         const val = fm[key];
         if (typeof val !== 'string' || !/^https?:\/\//i.test(val)) continue;
-        targets.push({ file, key, url: val });
+        targets.push({ file, key, url: val, fm });
         foundLiveUrl = true;
       }
       if (foundLiveUrl) continue;
@@ -351,22 +355,25 @@ export default class TextCoverPlugin extends Plugin {
       // Plus's other cover fields, which are never overwritten by our own
       // download step and often still hold the original remote link.
       let brokenKey: string | null = null;
+      let weakFile: { key: string; file: TFile } | null = null;
       for (const key of IMAGE_PROPERTY_KEYS) {
         const val = fm[key];
         if (typeof val !== 'string' || !val) continue;
-        if (!this.app.metadataCache.getFirstLinkpathDest(val, file.path)) {
+        const dest = this.app.metadataCache.getFirstLinkpathDest(val, file.path);
+        if (!dest) {
           brokenKey = key;
           break;
         }
+        // Case 3: the file exists but is a thumbnail/placeholder from an earlier
+        // download. Retry it so a better source can replace it.
+        if (dest.stat.size < MIN_GOOD_BYTES && !weakFile) weakFile = { key, file: dest };
       }
-      if (!brokenKey) continue;
 
-      for (const altKey of ALT_SOURCE_KEYS) {
-        const val = fm[altKey];
-        if (typeof val === 'string' && /^https?:\/\//i.test(val)) {
-          targets.push({ file, key: brokenKey, url: val });
-          break;
-        }
+      const altUrl = ALT_SOURCE_KEYS.map((k) => fm[k]).find((v) => typeof v === 'string' && /^https?:\/\//i.test(v)) as string | undefined;
+      if (brokenKey) {
+        if (altUrl) targets.push({ file, key: brokenKey, url: altUrl, fm });
+      } else if (weakFile && (altUrl || isbnOf(fm))) {
+        targets.push({ file, key: weakFile.key, url: altUrl ?? '', fm, upgrade: weakFile.file });
       }
     }
 
@@ -378,14 +385,18 @@ export default class TextCoverPlugin extends Plugin {
     }
 
     let done = 0;
-    for (const { file, key, url } of targets) {
+    for (const { file, key, url, fm, upgrade } of targets) {
       try {
-        const localPath = await this._downloadCover(file, url);
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
-          fm[key] = localPath;
-        });
-        this._log(`Downloaded cover for "${file.basename}" → ${localPath}`);
-        done++;
+        const localPath = await this._downloadCover(file, url, fm, upgrade);
+        if (!localPath) {
+          this._log(`No better cover found for "${file.basename}"`);
+        } else {
+          await this.app.fileManager.processFrontMatter(file, (f) => {
+            f[key] = localPath;
+          });
+          this._log(`Downloaded cover for "${file.basename}" → ${localPath}`);
+          done++;
+        }
       } catch (e) {
         this._log(`Failed to download cover for "${file.basename}": ${(e as Error).message}`);
       }
@@ -396,8 +407,15 @@ export default class TextCoverPlugin extends Plugin {
     return done;
   }
 
-  private async _downloadCover(file: TFile, url: string): Promise<string> {
-    const res = await this._fetchBestCoverResponse(url);
+  private async _downloadCover(file: TFile, url: string, fm: Record<string, unknown>, upgrade?: TFile): Promise<string | null> {
+    const res = await this._fetchBestCoverResponse(url, fm);
+
+    if (upgrade) {
+      // Only replace the existing file if the new image is clearly bigger.
+      if (res.arrayBuffer.byteLength <= upgrade.stat.size * 1.5) return null;
+      await this.app.vault.modifyBinary(upgrade, res.arrayBuffer);
+      return upgrade.path;
+    }
 
     const folder = this.settings.coversFolder || 'Covers';
     const ext = extensionFromContentType(res.headers['content-type']) ?? extensionFromUrl(url) ?? '.jpg';
@@ -425,37 +443,62 @@ export default class TextCoverPlugin extends Plugin {
   // ask for a different zoom level directly — confirmed live: zoom=0 typically
   // returns ~1800x2700 vs. ~128x193 for zoom=1. Some volumes only have a real
   // image at certain zoom levels, so we try a few and keep the largest valid one.
-  private async _fetchBestCoverResponse(url: string) {
-    const parsed = tryParseUrl(url);
+  private async _fetchBestCoverResponse(url: string, fm: Record<string, unknown> = {}) {
+    type Res = Awaited<ReturnType<typeof requestUrl>>;
+    let best: Res | null = null;
+    const consider = (res: Res | null): res is Res => {
+      if (!res) return false;
+      if (!best || res.arrayBuffer.byteLength > best.arrayBuffer.byteLength) best = res;
+      return res.arrayBuffer.byteLength >= MIN_GOOD_BYTES;
+    };
+    const tryGet = async (u: string): Promise<Res | null> => {
+      try {
+        const r = await requestUrl({ url: u });
+        return /image\//i.test(r.headers['content-type'] ?? 'image/') ? r : null;
+      } catch {
+        return null; // not available — try the next source
+      }
+    };
+
+    const parsed = url ? tryParseUrl(url) : null;
     const isGoogleBooksContent =
       parsed && /(^|\.)books\.google\.[a-z.]+$/i.test(parsed.hostname) && parsed.pathname.includes('/books/content');
+    const id = parsed?.searchParams.get('id');
 
-    if (!parsed || !isGoogleBooksContent) {
-      return requestUrl({ url: url.replace(/^http:\/\//i, 'https://') });
+    if (parsed && !isGoogleBooksContent) {
+      if (consider(await tryGet(url.replace(/^http:\/\//i, 'https://')))) return best!;
     }
 
-    const id = parsed.searchParams.get('id');
-    const printsec = parsed.searchParams.get('printsec') ?? 'frontcover';
-    if (!id) return requestUrl({ url: parsed.toString().replace(/^http:\/\//i, 'https://') });
-
-    const MIN_GOOD_BYTES = 15000; // ~128px thumbnails are a few KB; real covers are much bigger
-    let best: Awaited<ReturnType<typeof requestUrl>> | null = null;
-
-    for (const zoom of [0, 3, 2, 1]) {
-      const candidate =
-        `https://books.google.com/books/content?id=${encodeURIComponent(id)}` +
-        `&printsec=${encodeURIComponent(printsec)}&img=1&zoom=${zoom}&source=gbs_api`;
-      try {
-        const res = await requestUrl({ url: candidate });
-        if (res.arrayBuffer.byteLength >= MIN_GOOD_BYTES) return res;
-        if (!best || res.arrayBuffer.byteLength > best.arrayBuffer.byteLength) best = res;
-      } catch {
-        // this zoom level isn't available for this volume — try the next one
+    // 1. Google Books direct zoom levels (zoom=1 is a ~128px thumbnail; zoom=0
+    //    is usually ~1800px). Some volumes only have a real image at some levels.
+    if (isGoogleBooksContent && id) {
+      const printsec = parsed!.searchParams.get('printsec') ?? 'frontcover';
+      for (const zoom of [0, 3, 2, 1]) {
+        const candidate =
+          `https://books.google.com/books/content?id=${encodeURIComponent(id)}` +
+          `&printsec=${encodeURIComponent(printsec)}&img=1&zoom=${zoom}&source=gbs_api`;
+        if (consider(await tryGet(candidate))) return best!;
       }
     }
 
-    if (best) return best;
-    return requestUrl({ url: parsed.toString().replace(/^http:\/\//i, 'https://') });
+    // 2. Open Library by ISBN — often a full-size scan when Google has none.
+    for (const isbn of isbnsOf(fm)) {
+      if (consider(await tryGet(`https://covers.openlibrary.org/b/isbn/${isbn}-L.jpg?default=false`))) return best!;
+    }
+
+    // 3. Google Books by ISBN lookup, taking the largest imageLink offered.
+    for (const isbn of isbnsOf(fm)) {
+      try {
+        const r = await requestUrl({ url: `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}` });
+        const links = r.json?.items?.[0]?.volumeInfo?.imageLinks;
+        const link: string | undefined = links?.extraLarge ?? links?.large ?? links?.medium;
+        if (link && consider(await tryGet(link.replace(/^http:\/\//i, 'https://').replace(/&edge=curl/, '')))) return best!;
+      } catch { /* no result */ }
+    }
+
+    if (best) return best as Res;
+    if (parsed) return requestUrl({ url: parsed.toString().replace(/^http:\/\//i, 'https://') });
+    throw new Error('no cover source available');
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -640,6 +683,16 @@ function tryParseUrl(url: string): URL | null {
   } catch {
     return null;
   }
+}
+
+function isbnsOf(fm: Record<string, unknown>): string[] {
+  return ['isbn13', 'isbn10']
+    .map((k) => String(fm[k] ?? '').replace(/[-\s]/g, ''))
+    .filter((v) => /^(\d{13}|\d{9}[\dXx])$/.test(v));
+}
+
+function isbnOf(fm: Record<string, unknown>): string | undefined {
+  return isbnsOf(fm)[0];
 }
 
 function sanitizeFilename(name: string): string {
