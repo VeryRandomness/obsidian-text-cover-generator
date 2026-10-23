@@ -25,6 +25,8 @@ const CACHE_SCHEMA_VERSION = 1;
 // real covers are much bigger.
 const MIN_GOOD_BYTES = 15000;
 
+const DEFAULT_COVERS_FOLDER = '0 Media/Covers';
+
 interface CacheEntry {
   text: string | null; // null = definitively no text (was in _noText)
   mtime: number;
@@ -53,6 +55,11 @@ export default class TextCoverPlugin extends Plugin {
   private _debounce: ReturnType<typeof setTimeout> | null = null;
   private _cacheSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private _rebuildDebounce: ReturnType<typeof setTimeout> | null = null;
+  private _autoQueue   = new Map<string, string>();   // path → path|url key awaiting download
+  private _autoFailed  = new Set<string>();           // path|url keys that yielded nothing this session
+  private _autoDone    = new Set<string>();           // path|url keys already downloaded (metadata may lag behind)
+  private _autoRunning = false;
+  private _resolvedDebounce: ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -68,7 +75,10 @@ export default class TextCoverPlugin extends Plugin {
     // cached stale text under the new mtime, and the fast path then skipped
     // the correct re-extraction when 'changed' arrived. 'changed' is the
     // authoritative signal, so it always forces a re-extract.
-    this.registerEvent(this.app.metadataCache.on('changed', (f) => this._refreshFile(f, true)));
+    this.registerEvent(this.app.metadataCache.on('changed', (f) => {
+      void this._refreshFile(f, true);
+      this._queueAutoDownload(f);
+    }));
     this.registerEvent(this.app.vault.on('delete',  (f) => {
       if (f instanceof TFile) {
         this._cache.delete(f.path);
@@ -102,6 +112,7 @@ export default class TextCoverPlugin extends Plugin {
     // metadata cache is usable, otherwise frontmatter reads come back empty and
     // wrong text (or "no text") gets cached against the file's current mtime.
     this.app.workspace.onLayoutReady(() => {
+      for (const f of this.app.vault.getMarkdownFiles()) this._queueAutoDownload(f);
       this._buildAll().then(() => {
         this._log(`Cache ready (${warmStart ? 'warm' : 'cold'} start) — ${this._cache.size} covers, ${this._nameIdx.size} names indexed.`);
         this.resetAndProcess();
@@ -109,7 +120,10 @@ export default class TextCoverPlugin extends Plugin {
     });
     // Picks up any files skipped above because their metadata wasn't indexed yet
     // (cheap: unchanged files hit the mtime fast path).
-    this.registerEvent(this.app.metadataCache.on('resolved', () => { void this._buildAll(); }));
+    this.registerEvent(this.app.metadataCache.on('resolved', () => {
+      if (this._resolvedDebounce) clearTimeout(this._resolvedDebounce);
+      this._resolvedDebounce = setTimeout(() => { this._resolvedDebounce = null; void this._buildAll(); }, 1000);
+    }));
 
     this._schedule();
     this._log('Text Cover Generator loaded.');
@@ -119,6 +133,7 @@ export default class TextCoverPlugin extends Plugin {
     this._observer.disconnect();
     if (this._debounce) clearTimeout(this._debounce);
     if (this._rebuildDebounce) clearTimeout(this._rebuildDebounce);
+    if (this._resolvedDebounce) clearTimeout(this._resolvedDebounce);
     if (this._cacheSaveTimer) {
       clearTimeout(this._cacheSaveTimer);
       void this._persist();
@@ -353,8 +368,11 @@ export default class TextCoverPlugin extends Plugin {
   // and Obsidian's Bases card view can fail to load them at all (CORS, mixed
   // content). Downloading them into the vault and repointing frontmatter at the
   // local file fixes both: it's now a same-origin resource with no CORS involved.
-  async downloadRemoteCovers(onProgress?: (done: number, total: number) => void): Promise<number> {
-    const files = this.app.vault.getMarkdownFiles();
+  async downloadRemoteCovers(
+    onProgress?: (done: number, total: number) => void,
+    opts: { only?: TFile; liveOnly?: boolean } = {},
+  ): Promise<number> {
+    const files = opts.only ? [opts.only] : this.app.vault.getMarkdownFiles();
     const targets: { file: TFile; key: string; url: string; fm: Record<string, unknown>; upgrade?: TFile }[] = [];
 
     for (const file of files) {
@@ -370,7 +388,7 @@ export default class TextCoverPlugin extends Plugin {
         targets.push({ file, key, url: val, fm });
         foundLiveUrl = true;
       }
-      if (foundLiveUrl) continue;
+      if (foundLiveUrl || opts.liveOnly) continue;
 
       // Case 2: the display property has a *local* value but the file behind
       // it doesn't actually exist (e.g. a previous download attempt failed
@@ -402,10 +420,7 @@ export default class TextCoverPlugin extends Plugin {
 
     if (targets.length === 0) return 0;
 
-    const folder = this.settings.coversFolder || 'Covers';
-    if (!(await this.app.vault.adapter.exists(folder))) {
-      await this.app.vault.createFolder(folder);
-    }
+    await this._ensureFolder(this.settings.coversFolder || DEFAULT_COVERS_FOLDER);
 
     let done = 0;
     for (const { file, key, url, fm, upgrade } of targets) {
@@ -430,6 +445,52 @@ export default class TextCoverPlugin extends Plugin {
     return done;
   }
 
+  private async _ensureFolder(folder: string) {
+    let cur = '';
+    for (const part of folder.split('/').filter(Boolean)) {
+      cur = cur ? `${cur}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(cur))) await this.app.vault.createFolder(cur);
+    }
+  }
+
+  // ── Automatic download ──────────────────────────────────────────────────────
+  // When a note's cover/banner/image property is a remote URL, fetch the best
+  // available image into the covers folder as soon as the note is indexed.
+  private _queueAutoDownload(file: TFile) {
+    if (!this.settings.autoDownloadCovers || file.extension !== 'md') return;
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!fm) return;
+    const url = IMAGE_PROPERTY_KEYS.map((k) => fm[k]).find((v) => typeof v === 'string' && /^https?:\/\//i.test(v));
+    if (!url) return;
+    const key = `${file.path}|${url}`;
+    if (this._autoFailed.has(key) || this._autoDone.has(key)) return; // already tried this exact URL this session
+    this._autoQueue.set(file.path, key);
+    void this._drainAutoQueue();
+  }
+
+  private async _drainAutoQueue() {
+    if (this._autoRunning) return;
+    this._autoRunning = true;
+    try {
+      while (this._autoQueue.size) {
+        const [path, key] = this._autoQueue.entries().next().value as [string, string];
+        this._autoQueue.delete(path);
+        const file = this.app.vault.getFileByPath(path);
+        if (!(file instanceof TFile)) continue;
+        try {
+          const n = await this.downloadRemoteCovers(undefined, { only: file, liveOnly: true });
+          if (n === 0) this._autoFailed.add(key);
+          else this._autoDone.add(key);
+        } catch (e) {
+          this._autoFailed.add(key);
+          this._log(`Auto-download failed for "${file.basename}": ${(e as Error).message}`);
+        }
+      }
+    } finally {
+      this._autoRunning = false;
+    }
+  }
+
   private async _downloadCover(file: TFile, url: string, fm: Record<string, unknown>, upgrade?: TFile): Promise<string | null> {
     const res = await this._fetchBestCoverResponse(url, fm);
 
@@ -440,7 +501,7 @@ export default class TextCoverPlugin extends Plugin {
       return upgrade.path;
     }
 
-    const folder = this.settings.coversFolder || 'Covers';
+    const folder = this.settings.coversFolder || DEFAULT_COVERS_FOLDER;
     const ext = extensionFromContentType(res.headers['content-type']) ?? extensionFromUrl(url) ?? '.jpg';
     const name = sanitizeFilename(file.basename) + ext;
     let path = `${folder}/${name}`;
@@ -489,6 +550,10 @@ export default class TextCoverPlugin extends Plugin {
     const id = parsed?.searchParams.get('id');
 
     if (parsed && !isGoogleBooksContent) {
+      // Try size-upgraded variants of the URL first, then the URL as given.
+      for (const candidate of upgradedUrls(url)) {
+        if (consider(await tryGet(candidate))) return best!;
+      }
       if (consider(await tryGet(url.replace(/^http:\/\//i, 'https://')))) return best!;
     }
 
@@ -706,6 +771,25 @@ function tryParseUrl(url: string): URL | null {
   } catch {
     return null;
   }
+}
+
+/** Larger-size variants of common cover-host thumbnail URLs, best first. */
+function upgradedUrls(url: string): string[] {
+  const https = url.replace(/^http:\/\//i, 'https://');
+  const out: string[] = [];
+  // Amazon / Goodreads / Audible: "._SX98_.jpg" style size modifiers → original.
+  if (/\._[A-Z]{2}[\w,]*_\.(jpe?g|png|webp)/i.test(https)) {
+    out.push(https.replace(/\._[A-Z]{2}[\w,]*_(\.(?:jpe?g|png|webp))/i, '$1'));
+  }
+  // Open Library: -S / -M → -L.
+  if (/covers\.openlibrary\.org/i.test(https) && /-[SM]\.jpg/i.test(https)) {
+    out.push(https.replace(/-[SM]\.jpg/i, '-L.jpg'));
+  }
+  // Apple / iTunes artwork: "/100x100bb.jpg" → large.
+  if (/mzstatic\.com/i.test(https)) {
+    out.push(https.replace(/\/\d+x\d+(bb|sr)?\.(jpg|png|webp)/i, '/1200x1200bb.$2'));
+  }
+  return out;
 }
 
 function isbnsOf(fm: Record<string, unknown>): string[] {

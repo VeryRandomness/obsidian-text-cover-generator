@@ -22,6 +22,8 @@ export interface TextCoverSettings {
   showQuoteMark: boolean;
   /** Vault-relative folder to save downloaded remote covers into */
   coversFolder: string;
+  /** Automatically download remote cover URLs as notes are indexed */
+  autoDownloadCovers: boolean;
   /** Log debug info to console */
   debugMode: boolean;
 }
@@ -36,7 +38,8 @@ export const DEFAULT_SETTINGS: TextCoverSettings = {
   fontSize: '0.82em',
   padding: '1em 1.1em',
   showQuoteMark: true,
-  coversFolder: 'Covers',
+  coversFolder: '0 Media/Covers',
+  autoDownloadCovers: true,
   debugMode: false,
 };
 
@@ -216,12 +219,25 @@ export class TextCoverSettingTab extends PluginSettingTab {
       .setDesc('Vault-relative folder to save downloaded remote covers into.')
       .addText((t) =>
         t
-          .setPlaceholder('Covers')
+          .setPlaceholder('0 Media/Covers')
           .setValue(this.plugin.settings.coversFolder)
           .onChange(async (v) => {
-            this.plugin.settings.coversFolder = v.trim().replace(/^\/+|\/+$/g, '') || 'Covers';
+            this.plugin.settings.coversFolder = v.trim().replace(/^\/+|\/+$/g, '') || '0 Media/Covers';
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName('Auto-download covers')
+      .setDesc(
+        'When a note’s cover property is a remote URL, automatically download the ' +
+          'highest-quality version into the covers folder and repoint the property at it.'
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoDownloadCovers).onChange(async (v) => {
+          this.plugin.settings.autoDownloadCovers = v;
+          await this.plugin.saveSettings();
+        })
       );
 
     new Setting(containerEl)
