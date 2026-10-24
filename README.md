@@ -1,5 +1,7 @@
 # Text Cover Generator
 
+> **Text Cover Generator is now part of [Vault Management](https://github.com/VeryRandomness/obsidian-vault-management)**, which also includes bullet variants, color swatches, bulk property editing, PDF export and theme updates. New features and fixes go there. When you switch, turn this plugin off first: Vault Management imports its settings and cover cache the first time it runs. This repo is archived and no longer updated.
+
 Shows automatically generated text as the cover of each card in Obsidian Bases card views. If a note has no cover image, it shows a snippet of the note instead.
 
 ## Install
